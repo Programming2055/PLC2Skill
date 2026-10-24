@@ -1,0 +1,211 @@
+FUNCTION_BLOCK "FB_ATS_2TX_BusCoupler"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+// Main-tie-main ATS sequencer for two transformer incomers (Q1, Q2) and a
+// bus-coupler (Q3). Open-transition (break-before-make). Owns the source
+// voltage monitors and the three breaker control blocks as multi-instances.
+//
+// 2-of-3 interlock: Q1, Q2 and Q3 are never all closed together (no parallel
+// of the two transformers through the tie). Enforced here AND must also be
+// hardwired between the breakers.
+   VAR_INPUT
+      // Source voltage (TRUE = healthy, from 3-ph monitoring relays)
+      S1_Vpresent : Bool;   // Transformer 1 (Bus A) source volts healthy
+      S2_Vpresent : Bool;   // Transformer 2 (Bus B) source volts healthy
+      VT1_On      : Bool;   // TR1 voltage-monitor supply healthy (enable)
+      VT2_On      : Bool;   // TR2 voltage-monitor supply healthy (enable)
+      // Breaker Q1 - Incomer 1
+      Q1_Closed : Bool; Q1_Open : Bool; Q1_Ready : Bool; Q1_Trip : Bool; Q1_Local : Bool;
+      // Breaker Q2 - Incomer 2
+      Q2_Closed : Bool; Q2_Open : Bool; Q2_Ready : Bool; Q2_Trip : Bool; Q2_Local : Bool;
+      // Breaker Q3 - Bus coupler
+      Q3_Closed : Bool; Q3_Open : Bool; Q3_Ready : Bool; Q3_Trip : Bool; Q3_Local : Bool;
+      // HMI manual commands (used only when AutoMode = FALSE)
+      Q1_ManClose : Bool; Q1_ManOpen : Bool;
+      Q2_ManClose : Bool; Q2_ManOpen : Bool;
+      Q3_ManClose : Bool; Q3_ManOpen : Bool;
+      // Mode & setpoints (from DB_ATS)
+      AutoMode      : Bool;   // TRUE = ATS auto; FALSE = ATS manual (HMI)
+      RetransEnable : Bool;   // TRUE = auto retransfer to normal on source return
+      Reset         : Bool;   // Reset breaker faults / lockouts (HMI)
+      UV_FailDly    : Time;   // Source-fail confirmation delay
+      V_RtnDly      : Time;   // Source healthy-return stabilisation delay
+      DeadTime      : Time;   // Open-transition dead time (residual-volts decay)
+      BkrOpTO       : Time;   // Breaker operation timeout
+   END_VAR
+   VAR_OUTPUT
+      Q1_Close : Bool; Q1_Trip_Cmd : Bool;
+      Q2_Close : Bool; Q2_Trip_Cmd : Bool;
+      Q3_Close : Bool; Q3_Trip_Cmd : Bool;
+      State          : Int;    // Active sequencer state (see state table)
+      TransferActive : Bool;   // In a transfer dead-time
+      Alm_S1_Fail    : Bool;
+      Alm_S2_Fail    : Bool;
+      Alm_BothDead   : Bool;
+      Alm_Q1_Fault   : Bool;   // Q1 fail-to-operate or protection lockout
+      Alm_Q2_Fault   : Bool;
+      Alm_Q3_Fault   : Bool;
+      Alm_Interlock  : Bool;   // A close was blocked by the 2-of-3 interlock
+   END_VAR
+   VAR
+      S1 : "FB_VMon";
+      S2 : "FB_VMon";
+      B1 : "FB_Breaker";
+      B2 : "FB_Breaker";
+      B3 : "FB_Breaker";
+      step         : Int := 0;
+      nextAfterDead : Int;
+      tDead        : TON_TIME;
+      deadStart    : Bool;
+      inh1 : Bool; inh2 : Bool; inh3 : Bool;
+      r1c : Bool; r1o : Bool;      // close / open requests for each breaker
+      r2c : Bool; r2o : Bool;
+      r3c : Bool; r3o : Bool;
+   END_VAR
+BEGIN
+    // === 1) Source voltage monitoring ===================================
+    #S1(VpresentHW := #S1_Vpresent, Enable := #VT1_On, FailDly := #UV_FailDly, RtnDly := #V_RtnDly);
+    #S2(VpresentHW := #S2_Vpresent, Enable := #VT2_On, FailDly := #UV_FailDly, RtnDly := #V_RtnDly);
+    #Alm_S1_Fail := #S1.Failed;
+    #Alm_S2_Fail := #S2.Failed;
+
+    // === 2) 2-of-3 bus interlock ========================================
+    // Inhibit a breaker's CLOSE when the other two are already closed.
+    #inh1 := #Q2_Closed AND #Q3_Closed;
+    #inh2 := #Q1_Closed AND #Q3_Closed;
+    #inh3 := #Q1_Closed AND #Q2_Closed;
+    #Alm_Interlock := (#r1c AND #inh1) OR (#r2c AND #inh2) OR (#r3c AND #inh3);
+
+    // === 3) Open-transition sequencer ===================================
+    CASE #step OF
+        0:  // INIT - establish the correct running state from live conditions
+            #r1c := FALSE; #r1o := FALSE; #r2c := FALSE; #r2o := FALSE; #r3c := FALSE; #r3o := FALSE;
+            IF #S1.Healthy AND #S2.Healthy THEN
+                #step := 1;
+            ELSIF #S1.Healthy AND NOT #S2.Healthy THEN
+                #step := 5;             // TR1 feeds both buses
+            ELSIF #S2.Healthy AND NOT #S1.Healthy THEN
+                #step := 3;             // TR2 feeds both buses
+            ELSE
+                #step := 8;             // both dead
+            END_IF;
+
+        1:  // NORMAL - Q1 & Q2 closed, Q3 open
+            #r1c := TRUE;  #r1o := FALSE;
+            #r2c := TRUE;  #r2o := FALSE;
+            #r3c := FALSE; #r3o := TRUE;
+            IF #AutoMode THEN
+                IF #S1.Failed AND #S2.Healthy THEN
+                    #step := 2;
+                ELSIF #S2.Failed AND #S1.Healthy THEN
+                    #step := 4;
+                ELSIF #S1.Failed AND #S2.Failed THEN
+                    #step := 8;
+                END_IF;
+            END_IF;
+
+        2:  // TR1 lost - trip incomer Q1 (tie stays open)
+            #r1c := FALSE; #r1o := TRUE;
+            #r3c := FALSE;
+            IF #B1.Open THEN
+                #deadStart := TRUE;
+                #tDead(IN := FALSE, PT := #DeadTime);   // arm/reset dead-time
+                #nextAfterDead := 3;
+                #step := 9;
+            END_IF;
+
+        3:  // RUNNING on TR2 - Q2 closed, Q3 closed, Q1 open
+            #r1c := FALSE; #r1o := TRUE;
+            #r2c := TRUE;  #r2o := FALSE;
+            #r3c := TRUE;  #r3o := FALSE;
+            IF #S2.Failed THEN
+                #step := 8;                         // now both lost
+            ELSIF #AutoMode AND #RetransEnable AND #S1.Healthy THEN
+                #step := 6;                         // retransfer to normal
+            END_IF;
+
+        4:  // TR2 lost - trip incomer Q2 (tie stays open)
+            #r2c := FALSE; #r2o := TRUE;
+            #r3c := FALSE;
+            IF #B2.Open THEN
+                #deadStart := TRUE;
+                #tDead(IN := FALSE, PT := #DeadTime);
+                #nextAfterDead := 5;
+                #step := 9;
+            END_IF;
+
+        5:  // RUNNING on TR1 - Q1 closed, Q3 closed, Q2 open
+            #r1c := TRUE;  #r1o := FALSE;
+            #r2c := FALSE; #r2o := TRUE;
+            #r3c := TRUE;  #r3o := FALSE;
+            IF #S1.Failed THEN
+                #step := 8;
+            ELSIF #AutoMode AND #RetransEnable AND #S2.Healthy THEN
+                #step := 7;
+            END_IF;
+
+        6:  // RETRANSFER from TR2 to normal - open tie, dead-time, then reclose Q1
+            #r3c := FALSE; #r3o := TRUE;
+            IF #B3.Open THEN
+                #deadStart := TRUE;
+                #tDead(IN := FALSE, PT := #DeadTime);
+                #nextAfterDead := 1;
+                #step := 9;
+            END_IF;
+
+        7:  // RETRANSFER from TR1 to normal - open tie, dead-time, then reclose Q2
+            #r3c := FALSE; #r3o := TRUE;
+            IF #B3.Open THEN
+                #deadStart := TRUE;
+                #tDead(IN := FALSE, PT := #DeadTime);
+                #nextAfterDead := 1;
+                #step := 9;
+            END_IF;
+
+        8:  // BOTH DEAD - all open, wait for a source to return
+            #r1c := FALSE; #r1o := TRUE;
+            #r2c := FALSE; #r2o := TRUE;
+            #r3c := FALSE; #r3o := TRUE;
+            #Alm_BothDead := TRUE;
+            IF #S1.Healthy AND NOT #S2.Healthy THEN
+                #Alm_BothDead := FALSE; #step := 5;
+            ELSIF #S2.Healthy AND NOT #S1.Healthy THEN
+                #Alm_BothDead := FALSE; #step := 3;
+            ELSIF #S1.Healthy AND #S2.Healthy THEN
+                #Alm_BothDead := FALSE; #step := 0;
+            END_IF;
+
+        9:  // Dead-time wait (break-before-make)
+            #TransferActive := TRUE;
+            #tDead(IN := #deadStart, PT := #DeadTime);
+            IF #tDead.Q THEN
+                #deadStart := FALSE;
+                #TransferActive := FALSE;
+                #step := #nextAfterDead;
+            END_IF;
+    END_CASE;
+
+    // === 4) Breaker control blocks ======================================
+    #B1(AutoClose := #r1c, AutoOpen := #r1o, Inhibit := #inh1,
+        ManMode := NOT #AutoMode, ManClose := #Q1_ManClose, ManOpen := #Q1_ManOpen,
+        LocalHW := #Q1_Local, FbClosed := #Q1_Closed, FbOpen := #Q1_Open,
+        FbReady := #Q1_Ready, TripAlarm := #Q1_Trip, Reset := #Reset, OpTime := #BkrOpTO);
+    #Q1_Close := #B1.CloseCmd; #Q1_Trip_Cmd := #B1.OpenCmd;
+    #Alm_Q1_Fault := #B1.Fault OR #B1.Locked;
+
+    #B2(AutoClose := #r2c, AutoOpen := #r2o, Inhibit := #inh2,
+        ManMode := NOT #AutoMode, ManClose := #Q2_ManClose, ManOpen := #Q2_ManOpen,
+        LocalHW := #Q2_Local, FbClosed := #Q2_Closed, FbOpen := #Q2_Open,
+        FbReady := #Q2_Ready, TripAlarm := #Q2_Trip, Reset := #Reset, OpTime := #BkrOpTO);
+    #Q2_Close := #B2.CloseCmd; #Q2_Trip_Cmd := #B2.OpenCmd;
+    #Alm_Q2_Fault := #B2.Fault OR #B2.Locked;
+
+    #B3(AutoClose := #r3c, AutoOpen := #r3o, Inhibit := #inh3,
+        ManMode := NOT #AutoMode, ManClose := #Q3_ManClose, ManOpen := #Q3_ManOpen,
+        LocalHW := #Q3_Local, FbClosed := #Q3_Closed, FbOpen := #Q3_Open,
+        FbReady := #Q3_Ready, TripAlarm := #Q3_Trip, Reset := #Reset, OpTime := #BkrOpTO);
+    #Q3_Close := #B3.CloseCmd; #Q3_Trip_Cmd := #B3.OpenCmd;
+    #Alm_Q3_Fault := #B3.Fault OR #B3.Locked;
+
+    #State := #step;
+END_FUNCTION_BLOCK

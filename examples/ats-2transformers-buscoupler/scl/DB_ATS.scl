@@ -1,0 +1,27 @@
+DATA_BLOCK "DB_ATS"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+// HMI mode/commands and ATS setpoints. Timer starting values are proposals,
+// NOT from a source document - tune on site.
+   VAR
+      // --- Mode & commands (HMI) ---
+      AutoMode      : Bool := TRUE;    // TRUE = ATS auto; FALSE = ATS manual
+      RetransEnable : Bool := TRUE;    // Auto retransfer to normal on source return
+      ClosedTrans   : Bool := FALSE;   // FALSE = open transition (this program). Closed
+                                       // transition needs a 25 sync-check relay + paralleling
+                                       // permission; NOT implemented here.
+      ATSReset      : Bool;            // Reset breaker faults / lockouts
+      AlarmReset    : Bool;            // Reset/acknowledge alarms (HMI)
+      // Manual per-breaker commands (used when AutoMode = FALSE)
+      Q1_ManClose : Bool; Q1_ManOpen : Bool;
+      Q2_ManClose : Bool; Q2_ManOpen : Bool;
+      Q3_ManClose : Bool; Q3_ManOpen : Bool;
+      // --- Setpoints (proposed starting values) ---
+      UV_FailDly : Time := T#3s;       // Source-fail confirmation (ride-through dips)
+      V_RtnDly   : Time := T#10s;      // Healthy-return stabilisation before retransfer
+      DeadTime   : Time := T#1s;       // Open-transition dead time (residual-volts decay)
+      BkrOpTO    : Time := T#2s;       // Breaker operation timeout
+      // --- Live status (written by the ATS FB) ---
+      State : Int;
+   END_VAR
+END_DATA_BLOCK

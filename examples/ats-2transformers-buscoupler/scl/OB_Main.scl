@@ -1,0 +1,30 @@
+ORGANIZATION_BLOCK "Main"
+// OB1 cyclic. "IDB_ATS" is the instance DB of FB_ATS_2TX_BusCoupler.
+// Physical I/O is wired through the symbolic tags in PLC_Tags.csv.
+BEGIN
+    "IDB_ATS"(
+        S1_Vpresent := "I_S1_Vok",
+        S2_Vpresent := "I_S2_Vok",
+        VT1_On      := "I_VT1_On",
+        VT2_On      := "I_VT2_On",
+        Q1_Closed := "I_Q1_Closed", Q1_Open := "I_Q1_Open", Q1_Ready := "I_Q1_Ready",
+        Q1_Trip   := "I_Q1_Trip",   Q1_Local := "I_Q1_Local",
+        Q2_Closed := "I_Q2_Closed", Q2_Open := "I_Q2_Open", Q2_Ready := "I_Q2_Ready",
+        Q2_Trip   := "I_Q2_Trip",   Q2_Local := "I_Q2_Local",
+        Q3_Closed := "I_Q3_Closed", Q3_Open := "I_Q3_Open", Q3_Ready := "I_Q3_Ready",
+        Q3_Trip   := "I_Q3_Trip",   Q3_Local := "I_Q3_Local",
+        Q1_ManClose := "DB_ATS".Q1_ManClose, Q1_ManOpen := "DB_ATS".Q1_ManOpen,
+        Q2_ManClose := "DB_ATS".Q2_ManClose, Q2_ManOpen := "DB_ATS".Q2_ManOpen,
+        Q3_ManClose := "DB_ATS".Q3_ManClose, Q3_ManOpen := "DB_ATS".Q3_ManOpen,
+        AutoMode      := "DB_ATS".AutoMode,
+        RetransEnable := "DB_ATS".RetransEnable,
+        Reset         := "DB_ATS".ATSReset,
+        UV_FailDly    := "DB_ATS".UV_FailDly,
+        V_RtnDly      := "DB_ATS".V_RtnDly,
+        DeadTime      := "DB_ATS".DeadTime,
+        BkrOpTO       := "DB_ATS".BkrOpTO,
+        Q1_Close => "Q_Q1_Close", Q1_Trip_Cmd => "Q_Q1_Trip",
+        Q2_Close => "Q_Q2_Close", Q2_Trip_Cmd => "Q_Q2_Trip",
+        Q3_Close => "Q_Q3_Close", Q3_Trip_Cmd => "Q_Q3_Trip",
+        State    => "DB_ATS".State);
+END_ORGANIZATION_BLOCK

@@ -1,0 +1,92 @@
+FUNCTION_BLOCK "FB_Breaker"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+// Generic ACB / breaker control with position decode, protection-trip
+// lockout (no auto reclose onto a fault), fail-to-operate supervision and
+// a close interlock input. Open/trip always dominates close.
+   VAR_INPUT
+      AutoClose : Bool;   // Auto close request (from ATS sequencer)
+      AutoOpen  : Bool;   // Auto open/trip request (from ATS sequencer)
+      Inhibit   : Bool;   // Close interlock (2-of-3 bus interlock)
+      ManMode   : Bool;   // TRUE = ATS in manual (HMI) mode
+      ManClose  : Bool;   // HMI manual close command
+      ManOpen   : Bool;   // HMI manual open command
+      LocalHW   : Bool;   // Breaker Local/Remote switch in LOCAL (PLC hands off)
+      FbClosed  : Bool;   // Feedback: CLOSED aux contact (52a)
+      FbOpen    : Bool;   // Feedback: OPEN aux contact (52b)
+      FbReady   : Bool;   // Racked-in + spring charged + ready to close
+      TripAlarm : Bool;   // Tripped by protection relay
+      Reset     : Bool;   // Fault / lockout reset (HMI)
+      OpTime    : Time;   // Operation timeout (fail to open / close)
+   END_VAR
+   VAR_OUTPUT
+      CloseCmd    : Bool;  // To close coil (maintained; pulse at the output module)
+      OpenCmd     : Bool;  // To shunt-trip coil (maintained; pulse at the output)
+      Closed      : Bool;  // Confirmed closed
+      Open        : Bool;  // Confirmed open
+      Available   : Bool;  // Healthy + ready for AUTO operation
+      Fault       : Bool;  // Fail-to-operate latched
+      Locked      : Bool;  // Protection lockout latched (no auto reclose)
+      Discrepancy : Bool;  // Both or neither aux contact (aux/wiring fault)
+   END_VAR
+   VAR
+      tOpen  : TON_TIME;
+      tClose : TON_TIME;
+   END_VAR
+BEGIN
+    // --- Position decode -------------------------------------------------
+    #Closed      := #FbClosed AND NOT #FbOpen;
+    #Open        := #FbOpen  AND NOT #FbClosed;
+    #Discrepancy := (#FbClosed AND #FbOpen) OR (NOT #FbClosed AND NOT #FbOpen);
+
+    // --- Protection lockout latch (no auto reclose onto a fault) ---------
+    IF #TripAlarm THEN
+        #Locked := TRUE;
+    ELSIF #Reset AND NOT #TripAlarm THEN
+        #Locked := FALSE;
+    END_IF;
+
+    // --- Command resolution ---------------------------------------------
+    #CloseCmd := FALSE;
+    #OpenCmd  := FALSE;
+
+    IF #LocalHW THEN
+        // Breaker in LOCAL: PLC does not drive coils (operator uses local control)
+        #CloseCmd := FALSE;
+        #OpenCmd  := FALSE;
+    ELSIF #ManMode THEN
+        // ATS manual: operator drives via HMI; close interlock still enforced
+        IF #ManClose AND #FbReady AND NOT #Inhibit AND NOT #Locked AND NOT #Fault THEN
+            #CloseCmd := TRUE;
+        END_IF;
+        IF #ManOpen THEN
+            #OpenCmd := TRUE;              // open / trip always permitted
+        END_IF;
+    ELSE
+        // ATS auto
+        IF #AutoClose AND #FbReady AND NOT #Inhibit AND NOT #Locked AND NOT #Fault THEN
+            #CloseCmd := TRUE;
+        END_IF;
+        IF #AutoOpen OR #Locked THEN
+            #OpenCmd := TRUE;              // trip request, or hold open while locked
+        END_IF;
+    END_IF;
+
+    // Open/trip dominates close - never assert both
+    IF #OpenCmd THEN
+        #CloseCmd := FALSE;
+    END_IF;
+
+    // --- Fail-to-operate supervision ------------------------------------
+    #tClose(IN := #CloseCmd AND NOT #Closed, PT := #OpTime);
+    #tOpen (IN := #OpenCmd  AND NOT #Open,   PT := #OpTime);
+    IF #tClose.Q OR #tOpen.Q THEN
+        #Fault := TRUE;
+    ELSIF #Reset THEN
+        #Fault := FALSE;
+    END_IF;
+
+    // --- Availability ----------------------------------------------------
+    #Available := #FbReady AND NOT #Locked AND NOT #Fault
+                  AND NOT #Discrepancy AND NOT #LocalHW AND NOT #ManMode;
+END_FUNCTION_BLOCK
