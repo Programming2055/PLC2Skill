@@ -1,0 +1,38 @@
+FUNCTION_BLOCK "FB_VMon"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+// Source voltage monitor. VpresentHW comes from a 3-phase voltage
+// monitoring relay (TRUE = all phases present and within U< / U> limits).
+   VAR_INPUT
+      VpresentHW : Bool;   // Source volts healthy (from monitoring relay)
+      Enable     : Bool;   // Monitor enabled (VT/monitor MCB healthy)
+      FailDly    : Time;   // Undervoltage confirmation / ride-through delay
+      RtnDly     : Time;   // Healthy-return stabilisation delay
+   END_VAR
+   VAR_OUTPUT
+      Healthy : Bool;      // Source confirmed healthy (after RtnDly)
+      Failed  : Bool;      // Source confirmed failed (after FailDly)
+   END_VAR
+   VAR
+      tFail : TON_TIME;
+      tRtn  : TON_TIME;
+   END_VAR
+BEGIN
+    #tFail(IN := #Enable AND NOT #VpresentHW, PT := #FailDly);
+    #tRtn (IN := #Enable AND     #VpresentHW, PT := #RtnDly);
+
+    IF NOT #Enable THEN
+        // Monitor not available: do not declare a fail (avoid nuisance trip),
+        // but source is not confirmed healthy either.
+        #Failed  := FALSE;
+        #Healthy := FALSE;
+    ELSE
+        IF #tFail.Q THEN
+            #Failed  := TRUE;
+            #Healthy := FALSE;
+        ELSIF #tRtn.Q THEN
+            #Healthy := TRUE;
+            #Failed  := FALSE;
+        END_IF;
+    END_IF;
+END_FUNCTION_BLOCK
